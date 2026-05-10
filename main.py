@@ -100,19 +100,6 @@ Following this text you will receive a list of article summaries in txt format.\
  ARTICLE SUMMARIES:
 """
 
-DEBUG_EXECSUM="""
-News casters, we’re breaking down the most urgent cyber threats and regulatory actions impacting businesses globally. First, Canada has imposed a massive penalty on a cryptocurrency platform: Cryptomus was fined $176.96 million for violating anti-money laundering laws. This wasn’t a minor breach—it directly facilitated child sexual abuse material trafficking, ransomware attacks, and sanctions evasion. FINTRAC found Cryptomus failed to report 122 suspicious transactions involving cybercrime services like bulletproof hosting and anonymous email accounts. The platform’s Vancouver address housed 76 foreign currency dealers without actual occupants, and its parent company, Xeltox Enterprises, is linked to Russian and Ukrainian cybercriminals. This case underscores how critical financial compliance is for platforms handling digital assets.
-
-Turning to active threats, a sophisticated phishing-as-a-service kit called Tykit has emerged as a major risk. First detected in May 2025, Tykit mimics Microsoft 365 login pages to steal credentials using adversary-in-the-middle attacks. It leverages XOR-encoded JavaScript in SVG files to redirect victims to fake sites, exploits Cloudflare Turnstile for CAPTCHA bypass, and exfiltrates credentials via a specific API endpoint. Key indicators include a SHA256 hash for its malicious files, domains like loginmicr0sft0nlineeckaf[.]52632651246148569845521065[.]cc, and C2 servers on segy[.]cc. This kit targets high-value sectors globally with severe consequences, making it a critical threat for organizations relying on Microsoft 365.
-
-Meanwhile, a Morocco-based group named Jingle Thief is executing targeted fraud against retail and consumer services. They specialize in cloud gift card theft through phishing and smishing campaigns, compromising Microsoft 365 accounts to move laterally within networks before issuing high-value gift cards for resale. Activity linked to CL-CRI-1032 overlaps with another group called Atlas Lion. Their operations use Moroccan IPs like 105.156.109.227 and phishing URLs that appear legitimate but target gift card systems—posing a direct risk to e-commerce businesses.
-
-On the technical front, security researchers at Sekoia have decoded Microsoft 365’s authentication bitfield values, revealing how 28 distinct authentication methods map to specific bit positions in UserAuthenticationMethod logs. For example, Password Hash Sync equals 16, while Passkey uses the value 33554432. This analysis helps security teams interpret authentication flows without relying on Microsoft documentation, though some bit positions remain unmapped. While valuable for internal security teams, this insight is less immediately critical than the active threats and regulatory actions we’ve covered.
-
-The most critical takeaway here is the escalating intersection of financial compliance and cybercrime. Cryptomus’ $176.96 million penalty demonstrates how regulatory bodies are holding platforms accountable for enabling global cybercrime networks. Simultaneously, threats like Tykit and Jingle Thief show attackers are increasingly sophisticated and targeted—using phishing, cloud exploitation, and gift card fraud to monetize vulnerabilities. Businesses must prioritize both technical defenses, like monitoring authentication logs and securing Microsoft 365 environments, and compliance measures to avoid similar penalties.
-
-In short: Canada’s action against Cryptomus sets a precedent for financial accountability, while Tykit and Jingle Thief highlight the urgent need for robust phishing defenses and real-time threat intelligence. Organizations cannot afford to ignore these developments—especially as attackers refine their tactics to exploit cloud services and financial systems. Stay vigilant, stay informed, and prioritize security that protects both your data and your reputation."""
-
 def parse_arguments() -> dict:
     parser = argparse.ArgumentParser(
         description=f"{APP_NAME} {APP_VERSION} - {APP_DESCRIPTION}"
@@ -462,8 +449,6 @@ def main(config):
             })
 
     # 2. For all articles read since our last run, visit the article link 
-    article_links = article_links[-10:] # Cut the Article list to 2 for debugging    print(f"DEBUG: Cut to {len(article_links)} Articles")
-
     # 2.1 Create a working cache directory where to save articles and summaries
     session_cache_dir_articles = cache_dir / str(end_time.strftime("%Y%m%d%H%M%S")) / "articles"
     session_cache_dir_summaries = cache_dir / str(end_time.strftime("%Y%m%d%H%M%S")) / "summaries"
