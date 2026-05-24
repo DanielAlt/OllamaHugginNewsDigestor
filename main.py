@@ -5,6 +5,7 @@ ollama-huggin-bridge
 
 ```bash
 ollama run qwen3:4b
+winget install "FFmpeg (Essentials Build)" 
 python -m pip install -r requirements.txt
 python main.py --days 1
 ```
@@ -23,7 +24,7 @@ In this program We want to achieve the following:
   - Named Malwares 
   - Indicators of Compromise (IOC)
   - Severity of issue or finding
-5. Each article summary should be written cache
+5. Each article summary should be written to cache
 6. An executive report should be generated and posted in a discord channel
 7. A 'Read aloud' MP3 file should be generated with the contents of 
  the executive summary.
@@ -33,9 +34,7 @@ In this program We want to achieve the following:
 - Some articles won't load via the 'requests' module, sites using ReactJS or 
  other such frameworks load all content from asynchronous calls after the initial
  page load. For such sites we need to 'detect' and load them in a headless 
- browser. 
-- Looks like there's a 50 Message Limit on Discord. We can Loop Pages. 
-- hardcoded Discord API credentials
+ browser. see: https://github.com/browserless/browserless 
 """
 import sys
 import argparse
@@ -48,6 +47,17 @@ import re
 import tiktoken
 import time
 import os
+import numpy as np
+import nltk  
+import subprocess
+
+from bark.generation import (
+    generate_text_semantic,
+    preload_models,
+)
+from bark.api import semantic_to_waveform
+from bark import generate_audio, SAMPLE_RATE
+from scipy.io.wavfile import write as write_wav
 
 from dotenv import load_dotenv
 from pydantic import BaseModel
@@ -56,6 +66,7 @@ from pathlib import Path
 from urllib.parse import urlparse, unquote
 from ollama import chat
 from ollama import ChatResponse
+from contextlib import ExitStack
 
 APP_NAME="OllamaHugginBridge"
 APP_VERSION="0.0.1"
@@ -107,6 +118,8 @@ Criticality is defined by the impact of not addressing a vulnerability \
  short paragraphs, in active voice. Don't use any markdown formatting, \
  bold or italics, or html tags. 
  - Always begin the summary output with "Today in CyberSecurity,"
+ - Never contain URLs or SHA256 hash data, since it is unnatural to speak those\
+ aloud. 
 
  ARTICLE SUMMARIES:
 """
@@ -280,9 +293,6 @@ class DiscordAPIClient():
         for i, group in enumerate(chunk_groups):
 
             payload_content = "\n".join(group)
-
-            print(f"Chunk {i+1}/{len(chunk_groups)} size={len(payload_content)}")
-
             response = requests.post(
                 f"https://discord.com/api/v10/channels/{DISCORD_WRITE_CHANNEL_ID}/messages",
                 headers=self.headers,
@@ -290,8 +300,6 @@ class DiscordAPIClient():
                     "content": payload_content
                 }
             )
-
-            print(response.status_code, response.text)
 
             if response.status_code == 422:
 
@@ -301,13 +309,6 @@ class DiscordAPIClient():
                     )
 
                 backoff_seconds = 2 ** retry_count
-
-                print(
-                    f"Received HTTP 422. "
-                    f"Retrying in {backoff_seconds} seconds "
-                    f"(attempt {retry_count + 1}/{MAX_RETRIES})"
-                )
-
                 time.sleep(backoff_seconds)
 
                 return self.send_message(
@@ -318,6 +319,22 @@ class DiscordAPIClient():
             response.raise_for_status()
 
         return response.json()
+
+    def send_attachments(self, attachments):
+        
+        with ExitStack() as stack:
+            files = []
+            
+            for i, filename in enumerate(attachments):
+                f = stack.enter_context(open(filename, "rb"))
+                files.append((f"files[{i}]", f))
+
+            response = requests.post(
+                f"https://discord.com/api/v10/channels/{DISCORD_WRITE_CHANNEL_ID}/messages",
+                data={"content": "Your files, as requested"}, 
+                files=files, 
+                headers=self.headers
+            )
 
 class ThreadManager():
     def __init__(self, max_concurrent_threads: int):
@@ -491,6 +508,25 @@ def get_meta_from_article_summaries(session_cache_dir_summaries: Path) -> list:
             fhandle.close()
     return {'ref': reference_list, 'ioc': ioc_list }
 
+def tts(text_prompt, output_filename):
+    text_prompt = text_prompt.replace("\n", " ").strip()
+
+    sentences = nltk.sent_tokenize(text_prompt)
+    speaker="v2/en_speaker_9"
+    silence = np.zeros(int(0.1 * SAMPLE_RATE), dtype=np.float32)
+
+    pieces = []
+    for i, sentence in enumerate(sentences):
+        audio_array = np.squeeze(generate_audio(sentence, history_prompt=speaker))
+        pieces.append(audio_array)
+
+        if i != len(sentences) - 1:
+            pieces.append(silence)
+
+    full_audio = np.concatenate(pieces, axis=0)
+    write_wav(f"{output_filename}.wav", SAMPLE_RATE, full_audio)
+    subprocess.run([ "ffmpeg", "-i", "input.wav", "-b:a", "64k", f"{output_filename}.mp3"], check=True)
+
 def main(config):
     global APP_NAME
     global APP_DEBUG_OUTPUT
@@ -579,26 +615,39 @@ def main(config):
 
     debug_output(f"Generating Final Executive Summary")
     exec_summary = executive_summary(config, session_cache_dir_summaries)
-    article_meta = get_meta_from_article_summaries(session_cache_dir_summaries)
 
-    exec_summary += "\n\nReferences:\n"
-    for ref in article_meta['ref']:
-        exec_summary += f"{ref}\n"
+    exec_summary_filename = f'exec-summary{str(end_time.strftime("%Y%m%d%H%M%S"))}' 
+    exec_summary_final = exec_summary[exec_summary.find("</think>")+8:]
+    exec_summary_think = exec_summary[exec_summary.find("<think>")+7:exec_summary.find("</think>")]
 
-    exec_summary += "\n\nIOCs:\n"
-    for ioc in article_meta['ioc']:
-        exec_summary += f"{ioc}\n"
-
-    with open(f'exec-summary{str(end_time.strftime("%Y%m%d%H%M%S"))}', 'w', encoding="utf8") as fhandle:
-        fhandle.write(exec_summary)
+    with open(f'{exec_summary_filename}.think.txt', 'w', encoding="utf8") as fhandle:
+        fhandle.write(exec_summary_think)
         fhandle.close()
 
-    exec_summary = exec_summary[exec_summary.find("</think>")+8:]
+    tts(exec_summary_final, exec_summary_filename)
+
+    article_meta = get_meta_from_article_summaries(session_cache_dir_summaries)
+    exec_summary_final += "\n\nReferences:\n"
+    for ref in article_meta['ref']:
+        exec_summary_final += f"{ref}\n"
+
+    exec_summary_final += "\n\nIOCs:\n"
+    for ioc in article_meta['ioc']:
+        exec_summary_final += f"{ioc}\n"
+
+    with open(f'{exec_summary_filename}.txt', 'w', encoding="utf8") as fhandle:
+        fhandle.write(exec_summary_final)
+        fhandle.close()
+
     debug_output(f"Sending Executive Summary to Discord Channel")
-    discord_client.send_message(exec_summary)
+    discord_client.send_attachments([
+        f"{exec_summary_filename}.txt", f"{exec_summary_filename}.mp3"
+    ])
+    # discord_client.send_message(exec_summary_final)
 
 if __name__ == "__main__":
     config = parse_arguments()
     load_dotenv()
+    preload_models()
     main(config)
     sys.exit(0)

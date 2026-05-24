@@ -4,3 +4,6 @@ tiktoken
 bs4
 pydantic
 python-dotenv
+nltk
+numpy
+bark
