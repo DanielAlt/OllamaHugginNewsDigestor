@@ -3,3 +3,4 @@ ollama
 tiktoken
 bs4
 pydantic
+python-dotenv

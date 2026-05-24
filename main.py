@@ -34,7 +34,7 @@ In this program We want to achieve the following:
  other such frameworks load all content from asynchronous calls after the initial
  page load. For such sites we need to 'detect' and load them in a headless 
  browser. 
-
+- Looks like there's a 50 Message Limit on Discord. We can Loop Pages. 
 - hardcoded Discord API credentials
 """
 import sys
@@ -46,7 +46,10 @@ import threading
 import platform
 import re
 import tiktoken
+import time
+import os
 
+from dotenv import load_dotenv
 from pydantic import BaseModel
 from bs4 import BeautifulSoup
 from pathlib import Path
@@ -57,19 +60,21 @@ from ollama import ChatResponse
 APP_NAME="OllamaHugginBridge"
 APP_VERSION="0.0.1"
 APP_CACHE_DIR="cache"
+APP_DEBUG_OUTPUT=False
 APP_DESCRIPTION="""\
 An AI (Ollama) digest of a Discord Message Channel devoted to collecting huggin\
  news articles. 
 """
 
-DISCORD_READ_CHANNEL_ID="1397390767009300531"
-DISCORD_WRITE_CHANNEL_ID="1502884461832835112"
-DISCORD_BOT_TOKEN="INSERT YOUR API TOKEN HERE "
+DISCORD_READ_CHANNEL_ID=1397390767009300531
+DISCORD_WRITE_CHANNEL_ID=1502884461832835112
+DISCORD_BOT_TOKEN=""
 DISCORD_EPOCH = 1420070400000
 
-OLLAMA_MAX_CTX = 16384
-OLLAMA_RESERVED_OUTPUT = 1024
+OLLAMA_MAX_CTX=16384
+OLLAMA_RESERVED_OUTPUT=1024
 SAFE_INPUT_TOKENS = OLLAMA_MAX_CTX - OLLAMA_RESERVED_OUTPUT
+
 OLLAMA_ARTICLE_SUMMARY_PROMPT="""\
 Following this text you will receive an article in txt format.\
  Summarize the article content. The summary should be no more than 500\
@@ -91,11 +96,17 @@ Following this text you will receive a list of article summaries in txt format.\
  the most critical. Skip any summaries that appear to be junk, make no mention\
  of them. 
 
+Criticality is defined by the impact of not addressing a vulnerability \
+ multiplied by it's likelihood of being exploited. Positive stories, and \
+ advisories about software updates (unless specifically addressing a \
+ vulnerability) should be treated as non-critical. 
+
  The executive summary should be 
  - 600 words long, at maximum.
- - contain no formatting, just text.  
- - formulated as a 'speech' that would be read by a News Caster. 
- - Always begin with "Today in CyberSecurity,"
+ - formulated as a 'speech' that would be read by a News Caster. This means \
+ short paragraphs, in active voice. Don't use any markdown formatting, \
+ bold or italics, or html tags. 
+ - Always begin the summary output with "Today in CyberSecurity,"
 
  ARTICLE SUMMARIES:
 """
@@ -136,9 +147,25 @@ def parse_arguments() -> dict:
         help="The name of the Ollama Model, default is qwen3.6"
     )
 
+    parser.add_argument(
+        "--debug-output",
+        type=bool,
+        required=False,
+        default=False,
+        help="Send debug ouput to the CLI"
+    )
+
     args = parser.parse_args()
 
     return vars(args)
+
+def debug_output(message, error=False):
+    if not APP_DEBUG_OUTPUT: 
+        return 
+    if not error:
+        sys.stdout.write(f"{message}\n")
+    else:
+        sys.stderr.write(f"{message}\n")
 
 def setup_cache_dir() -> Path:
     if platform.system() == "Windows":
@@ -221,37 +248,74 @@ class DiscordAPIClient():
         messages = response.json()
         return messages
 
-    def send_message(
-        self,
-        content: str
-    ) -> dict:
+    def send_message(self, content: str, retry_count: int = 0) -> dict:
 
-        # We will split the content size into paragraphs and assure that the sum 
-        # of the paragraphs does not exceed 2000, sending the maximum allowable 
-        # number of paragraphs not exceeding the 2000 character limit at a time 
-        content_chunks = content.split("\n")
-        chunk_groups = [[]]
-        chunk_size = 0
-        for i in range(0, len(content_chunks)):
-            current_chunk = content_chunks[i]
-            current_chunk_size = chunk_size + len(current_chunk)
-            if current_chunk_size > 1999:
-                chunk_groups.append([current_chunk])
-                chunk_size = len(current_chunk)
+        MAX_RETRIES = 5
+
+        lines = content.split("\n")
+
+        chunk_groups = []
+        current_group = []
+
+        for line in lines:
+
+            test_group = current_group + [line]
+            test_content = "\n".join(test_group)
+
+            if len(test_content) > 1999:
+
+                if current_group:
+                    chunk_groups.append(current_group)
+
+                current_group = [line]
+
             else:
-                chunk_group_index = len(chunk_groups)-1
-                chunk_groups[chunk_group_index].append(current_chunk)
-                chunk_size += len(current_chunk) 
+                current_group.append(line)
 
-        for chunk_group in chunk_groups:
-            """ Send a message to a Discord channel """
-            api_url = f"https://discord.com/api/v10/channels/{DISCORD_WRITE_CHANNEL_ID}/messages"
-            payload = { "content": "\n".join(chunk_group) }
+        if current_group:
+            chunk_groups.append(current_group)
+
+        response = None
+
+        for i, group in enumerate(chunk_groups):
+
+            payload_content = "\n".join(group)
+
+            print(f"Chunk {i+1}/{len(chunk_groups)} size={len(payload_content)}")
+
             response = requests.post(
-                api_url,
+                f"https://discord.com/api/v10/channels/{DISCORD_WRITE_CHANNEL_ID}/messages",
                 headers=self.headers,
-                json=payload
+                json={
+                    "content": payload_content
+                }
             )
+
+            print(response.status_code, response.text)
+
+            if response.status_code == 422:
+
+                if retry_count >= MAX_RETRIES:
+                    raise Exception(
+                        f"Maximum retries exceeded for Discord message send: {response.text}"
+                    )
+
+                backoff_seconds = 2 ** retry_count
+
+                print(
+                    f"Received HTTP 422. "
+                    f"Retrying in {backoff_seconds} seconds "
+                    f"(attempt {retry_count + 1}/{MAX_RETRIES})"
+                )
+
+                time.sleep(backoff_seconds)
+
+                return self.send_message(
+                    content=content,
+                    retry_count=retry_count + 1
+                )
+
+            response.raise_for_status()
 
         return response.json()
 
@@ -345,7 +409,7 @@ def summarize_articles(config: dict, session_cache_dir_articles: Path, session_c
                 article_content,
                 SAFE_INPUT_TOKENS // 2
             )
-        print(f"Summarizing Article: {article_title}")
+        debug_output(f"Summarizing Article: {article_title}")
         prompt = f"{OLLAMA_ARTICLE_SUMMARY_PROMPT}\n\n{article_content}"
         now = datetime.datetime.now()
         response: ChatResponse = chat(
@@ -363,7 +427,7 @@ def summarize_articles(config: dict, session_cache_dir_articles: Path, session_c
         )
         then = datetime.datetime.now()
         delta = then - now 
-        print(f"Ran for {delta} seconds")
+        debug_output(f"Ran for {delta} seconds")
 
         article = Article.model_validate_json(response.message.content)
         article_dict = article.model_dump()
@@ -413,18 +477,46 @@ def executive_summary(config: dict, session_cache_dir_summaries: Path) -> str:
     )
     then = datetime.datetime.now()
     delta = then - now 
-    content = re.sub(
-        r"<think>.*?</think>",
-        "",
-        response.message.content,
-        flags=re.DOTALL | re.IGNORECASE
-    ).strip()
+    debug_output(f"Ran for {delta} seconds")
+    return response.message.content
 
-    print(f"Ran for {delta} seconds")
-    return content
+def get_meta_from_article_summaries(session_cache_dir_summaries: Path) -> list:
+    reference_list = []
+    ioc_list = []
+    for article_summary_path in session_cache_dir_summaries.iterdir():
+        with open(article_summary_path, 'r', encoding="utf8") as fhandle:
+            summary_json = json.loads(fhandle.read())
+            reference_list.append(summary_json['url'])
+            ioc_list += summary_json['iocs']
+            fhandle.close()
+    return {'ref': reference_list, 'ioc': ioc_list }
 
 def main(config):
+    global APP_NAME
+    global APP_DEBUG_OUTPUT
+    global APP_VERSION
+    global APP_CACHE_DIR
+    global DISCORD_READ_CHANNEL_ID
+    global DISCORD_WRITE_CHANNEL_ID
+    global DISCORD_BOT_TOKEN
+    global OLLAMA_MAX_CTX
+    global OLLAMA_RESERVED_OUTPUT
+    global SAFE_INPUT_TOKENS
+    
+    APP_NAME                    = str(os.getenv('APP_NAME'))
+    APP_DEBUG_OUTPUT            = bool(os.getenv('APP_DEBUG_OUTPUT'))
+    APP_VERSION                 = str(os.getenv('APP_VERSION'))
+    APP_CACHE_DIR               = str(os.getenv('APP_CACHE_DIR'))
+    DISCORD_READ_CHANNEL_ID     = str(os.getenv('DISCORD_READ_CHANNEL_ID'))
+    DISCORD_WRITE_CHANNEL_ID    = str(os.getenv('DISCORD_WRITE_CHANNEL_ID'))
+    DISCORD_BOT_TOKEN           = str(os.getenv('DISCORD_BOT_TOKEN'))
+    OLLAMA_MAX_CTX              = int(os.getenv('OLLAMA_MAX_CTX'))
+    OLLAMA_RESERVED_OUTPUT      = int(os.getenv('OLLAMA_RESERVED_OUTPUT'))
+    SAFE_INPUT_TOKENS = OLLAMA_MAX_CTX - OLLAMA_RESERVED_OUTPUT
+
     cache_dir = setup_cache_dir() # installation step
+    debug_output(f"Starting {APP_NAME} with configuration")
+    debug_output(str(config))
 
     # 1. Go to Discord, read the given channel
     end_time            = datetime.datetime.now(datetime.UTC)
@@ -432,11 +524,13 @@ def main(config):
     after_snowflake     = datetime_to_snowflake(start_time)
     before_snowflake    = datetime_to_snowflake(end_time)
 
+    debug_output("Fetching discord messages...")
     discord_client = DiscordAPIClient()
     messages = discord_client.read_messages({
         "after": after_snowflake,
         "before": before_snowflake
     })
+    debug_output(f"Retreived {len(messages)} messages from discord")
 
     article_links = []
     for message in messages: 
@@ -447,7 +541,9 @@ def main(config):
                 "url": message['embeds'][0]['url'],
                 "title": message['embeds'][0]['title']
             })
+    debug_output(f"Filtered to {len(article_links)} articles")
 
+    debug_output("Setting up cache directories for session")
     # 2. For all articles read since our last run, visit the article link 
     # 2.1 Create a working cache directory where to save articles and summaries
     session_cache_dir_articles = cache_dir / str(end_time.strftime("%Y%m%d%H%M%S")) / "articles"
@@ -456,6 +552,7 @@ def main(config):
     Path(session_cache_dir_summaries).mkdir(exist_ok=True, parents=True)
 
     # 2.2 Create the thread manager
+    debug_output("Preparing to Lookup Articles, spawning thread manager")
     max_threads = config['max_threads'] if config['max_threads'] is not None else 4 
     thread_manager = ThreadManager(max_concurrent_threads=max_threads)
     for article_dict in article_links:
@@ -467,21 +564,41 @@ def main(config):
             cache_dir=session_cache_dir_articles
         )
     # 3. Retrieve the full article content 
+    debug_output("Running multi-threaded article lookups")
     thread_manager.run_all()
 
     # 4. At this point articles are all stored as 'txt' files, 
     # in the session_cache_dir path. summarize them with Ollama
     # We do this 1 at a time to avoid melting the computer...
+    debug_output("Preparing to summarize articles with Ollama")
     summarize_articles(
         config, 
         session_cache_dir_articles, 
         session_cache_dir_summaries
     )
 
+    debug_output(f"Generating Final Executive Summary")
     exec_summary = executive_summary(config, session_cache_dir_summaries)
+    article_meta = get_meta_from_article_summaries(session_cache_dir_summaries)
+
+    exec_summary += "\n\nReferences:\n"
+    for ref in article_meta['ref']:
+        exec_summary += f"{ref}\n"
+
+    exec_summary += "\n\nIOCs:\n"
+    for ioc in article_meta['ioc']:
+        exec_summary += f"{ioc}\n"
+
+    with open(f'exec-summary{str(end_time.strftime("%Y%m%d%H%M%S"))}', 'w', encoding="utf8") as fhandle:
+        fhandle.write(exec_summary)
+        fhandle.close()
+
+    exec_summary = exec_summary[exec_summary.find("</think>")+8:]
+    debug_output(f"Sending Executive Summary to Discord Channel")
     discord_client.send_message(exec_summary)
 
 if __name__ == "__main__":
     config = parse_arguments()
+    load_dotenv()
     main(config)
     sys.exit(0)
