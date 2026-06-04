@@ -4,9 +4,15 @@ ollama-huggin-bridge
 # QuickStart
 
 ```bash
-ollama run qwen3:4b
-winget install "FFmpeg (Essentials Build)" 
+py install 3.11
+py -3.11 -m venv venv
+./venv/Scripts/activate
+python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
+winget install "FFmpeg (Essentials Build)" 
+
+# Install Ollama
+ollama run qwen3:4b
 python main.py --days 1
 ```
 
@@ -47,18 +53,10 @@ import re
 import tiktoken
 import time
 import os
-import numpy as np
-import nltk  
+import torch
 import subprocess
 
-from bark.generation import (
-    generate_text_semantic,
-    preload_models,
-)
-from bark.api import semantic_to_waveform
-from bark import generate_audio, SAMPLE_RATE
-from scipy.io.wavfile import write as write_wav
-
+from TTS.api import TTS
 from dotenv import load_dotenv
 from pydantic import BaseModel
 from bs4 import BeautifulSoup
@@ -509,23 +507,17 @@ def get_meta_from_article_summaries(session_cache_dir_summaries: Path) -> list:
     return {'ref': reference_list, 'ioc': ioc_list }
 
 def tts(text_prompt, output_filename):
-    text_prompt = text_prompt.replace("\n", " ").strip()
-
-    sentences = nltk.sent_tokenize(text_prompt)
-    speaker="v2/en_speaker_9"
-    silence = np.zeros(int(0.1 * SAMPLE_RATE), dtype=np.float32)
-
-    pieces = []
-    for i, sentence in enumerate(sentences):
-        audio_array = np.squeeze(generate_audio(sentence, history_prompt=speaker))
-        pieces.append(audio_array)
-
-        if i != len(sentences) - 1:
-            pieces.append(silence)
-
-    full_audio = np.concatenate(pieces, axis=0)
-    write_wav(f"{output_filename}.wav", SAMPLE_RATE, full_audio)
-    subprocess.run([ "ffmpeg", "-i", "input.wav", "-b:a", "64k", f"{output_filename}.mp3"], check=True)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2").to(device)
+    speaker_wav = "voice-samples/voice-sample3.1m.wav"   # your reference voice
+    language = "en"
+    tts.tts_to_file(
+        text=text_prompt,
+        speaker_wav=speaker_wav,
+        language=language,
+        file_path=f"{output_filename}.wav"
+    )
+    subprocess.run([ "ffmpeg", "-i", f"{output_filename}.wav", "-b:a", "64k", f"{output_filename}.mp3"], check=True)
 
 def main(config):
     global APP_NAME
@@ -616,11 +608,11 @@ def main(config):
     debug_output(f"Generating Final Executive Summary")
     exec_summary = executive_summary(config, session_cache_dir_summaries)
 
-    exec_summary_filename = f'exec-summary{str(end_time.strftime("%Y%m%d%H%M%S"))}' 
+    exec_summary_filename = cache_dir / str(end_time.strftime("%Y%m%d%H%M%S")) / 'exec-summary' 
     exec_summary_final = exec_summary[exec_summary.find("</think>")+8:]
     exec_summary_think = exec_summary[exec_summary.find("<think>")+7:exec_summary.find("</think>")]
 
-    with open(f'{exec_summary_filename}.think.txt', 'w', encoding="utf8") as fhandle:
+    with open(f"{exec_summary_filename}.think.txt", 'w', encoding="utf8") as fhandle:
         fhandle.write(exec_summary_think)
         fhandle.close()
 
@@ -643,11 +635,9 @@ def main(config):
     discord_client.send_attachments([
         f"{exec_summary_filename}.txt", f"{exec_summary_filename}.mp3"
     ])
-    # discord_client.send_message(exec_summary_final)
 
 if __name__ == "__main__":
     config = parse_arguments()
     load_dotenv()
-    preload_models()
     main(config)
     sys.exit(0)
