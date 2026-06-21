@@ -2,100 +2,30 @@
 
 ## Overview
 
-Ollama Huggin Bridge is a cybersecurity news automation tool.
-
-It reads article links from a Discord channel, downloads the articles, summarizes them with a local Ollama model, creates an executive briefing, generates a narrated audio version using XTTS voice cloning, and posts the results back to Discord.
+This is a Cybersecurity news automation tool. It uses Ollama (Local LLMs) to digest and summarize threat intelligence blogs and extract actionable IOCs and TTPs. It also generates a 'news report' style executive breifing, that you can listen to while you're on the go. 
 
 The project is designed to help security teams quickly review large numbers of threat intelligence and cybersecurity news articles without reading every source manually.
 
 ## What the Application Does
 
-1. Reads messages from a Discord channel containing cybersecurity news articles.
-2. Extracts article URLs from Discord embeds.
-3. Downloads and stores the article content locally.
-4. Uses a local Ollama model to create structured summaries.
-5. Extracts:
-   - Organizations and vendors
-   - Malware names
-   - Indicators of Compromise (IOCs)
-   - Severity information
-6. Stores article summaries as JSON files.
-7. Generates an executive summary covering all articles.
-8. Converts the executive summary into speech using XTTS.
-9. Produces:
-   - Executive summary text file
-   - Executive summary MP3 file
-10. Uploads the final report and audio briefing back to Discord.
-
-## Architecture
-
-Discord News Feed
-        |
-        v
-Download Articles
-        |
-        v
-Extract Text Content
-        |
-        v
-Ollama Summarization
-        |
-        v
-Structured JSON Summaries
-        |
-        v
-Executive Summary
-        |
-        +----> Text Report
-        |
-        +----> XTTS Audio Report
-        |
-        v
-Post Results to Discord
-
-## Requirements
-
-### Software
-
-- Python 3.11
-- Ollama
-- FFmpeg
-- Discord Bot Token
-- CUDA-capable GPU (recommended for XTTS)
-
-### Python Packages
-
-The project uses packages such as:
-
-- requests
-- ollama
-- tiktoken
-- beautifulsoup4
-- python-dotenv
-- pydantic
-- torch
-- TTS
-
-Install all dependencies through `requirements.txt`.
+![Image](sources/Infographic.png)
 
 ## Installation
 
-### 1. Install Python
 
-Install Python 3.11.
+Begin by installing [Python 3.11](https://www.python.org/downloads/)
 
-### 2. Create a Virtual Environment
-
+Create a Virtual Environment
 ```bash
 py -3.11 -m venv venv
 ```
 
-### 3. Activate the Environment
+Activate the Environment
 
 Windows:
 
-```bash
-.\venv\Scripts\activate
+```powershell
+.\venv\Scripts\activate 
 ```
 
 Linux/macOS:
@@ -104,19 +34,14 @@ Linux/macOS:
 source venv/bin/activate
 ```
 
-### 4. Upgrade Pip
+Install Dependencies
 
 ```bash
 python -m pip install --upgrade pip
-```
-
-### 5. Install Dependencies
-
-```bash
 python -m pip install -r requirements.txt
 ```
 
-### 6. Install FFmpeg
+Install FFmpeg
 
 Windows:
 
@@ -130,7 +55,7 @@ Verify installation:
 ffmpeg -version
 ```
 
-### 7. Install Ollama
+[Install Ollama](https://ollama.com/)
 
 Start Ollama and pull a model:
 
@@ -160,14 +85,61 @@ OLLAMA_MAX_CTX=16384
 OLLAMA_RESERVED_OUTPUT=1024
 ```
 
-### Discord Permissions
+### Discord Setup and Permissions
 
-The bot requires permission to:
+You will need to register a new bot application on the Discord Developer dashboard. 
 
-- Read messages
-- Read message history
-- Send messages
-- Upload files
+https://discord.com/developers/applications
+
+1. Click New Application.
+2. Open Bot → Add Bot.
+3. Copy the Bot Token
+4. Under OAuth2 → URL Generator, select:
+ - Scopes: bot
+ - Bot Permissions: required permissions
+    - Read messages
+    - Read message history
+    - Send messages
+    - Upload files
+
+5. Open the generated invite URL.
+6. Select your server and authorize.
+7. Start your bot using the token.
+
+When you setup your server, You will need to dedicate 2 channels
+- A channel to dump RSS feed data into
+- A channel to upload executive summaries to
+
+For your RSS dump channel, setup a webhook that your huginn agents can post to. You can use the following Agent JSON to configure your Discord POST agent in Huginn. 
+
+```
+{
+  "method": "post",
+  "headers": {},
+  "payload": {
+    "embeds": [
+      {
+        "url": "{{url}}",
+        "color": 5793266,
+        "title": "{{title}}",
+        "description": "{{description}}"
+      }
+    ],
+    "content": "New Article Found",
+    "username": "Threat Intelligence Bot",
+    "avatar_url": "https://static.wikia.nocookie.net/hackers/images/8/8a/Acid_burn.jpg/revision/latest?cb=20150710211643"
+  },
+  "no_merge": true,
+  "post_url": "[INSERT DISCORD WEBHOOK URL]",
+  "parse_body": false,
+  "emit_events": false,
+  "output_mode": "clean",
+  "content_type": "json",
+  "expected_receive_period_in_days": 1
+}
+```
+
+Update your .env file with the channel IDs of your two channels and the secret token of your new bot. 
 
 ## Voice Cloning
 
@@ -177,7 +149,7 @@ The application expects a reference voice sample at:
 voice-samples/voice-sample3.1m.wav
 ```
 
-Replace this file with your preferred speaker sample.
+Replace this file with your preferred speaker sample. Your sample should be between 30 seconds and 1 minute; and should contain uninterrupted speech audio from your desired speaker.  
 
 The XTTS model used is:
 
@@ -201,38 +173,8 @@ python main.py ^
   --max-threads 8 ^
   --thread-timeout 60 ^
   --model-name qwen3:4b
+  --debug 1
 ```
-
-### Command Line Arguments
-
-| Argument | Description |
-|----------|-------------|
-| --days | Number of days of Discord history to process |
-| --max-threads | Maximum concurrent article download threads |
-| --thread-timeout | Timeout for article downloads |
-| --model-name | Ollama model name |
-
-## Output
-
-For each run, the application creates a timestamped cache directory containing:
-
-```text
-cache/
-└── YYYYMMDDHHMMSS/
-    ├── articles/
-    ├── summaries/
-    ├── exec-summary.txt
-    ├── exec-summary.think.txt
-    └── exec-summary.mp3
-```
-
-### Generated Files
-
-- Article text cache
-- Structured article summaries (JSON)
-- Executive summary report
-- XTTS-generated audio briefing
-- AI reasoning output (if present)
 
 ## Known Limitations
 

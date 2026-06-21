@@ -24,7 +24,7 @@ In this program We want to achieve the following:
 
 1. Go to Discord, read the given channel (of RSS feeds)
 2. For all articles read since our last run, visit the article link 
-3. Retrieve the full article content 
+3. Retrieve the full article content via http
 4. Summarize each article with AI; pay specific attention to:
   - Named people/organizations
   - Named Malwares 
@@ -35,9 +35,9 @@ In this program We want to achieve the following:
 7. A 'Read aloud' MP3 file should be generated with the contents of 
  the executive summary.
 
-## Bugs
+## Bugs and Features
 
-- Some articles won't load via the 'requests' module, sites using ReactJS or 
+- [Bug] Some articles won't load via the 'requests' module, sites using ReactJS or 
  other such frameworks load all content from asynchronous calls after the initial
  page load. For such sites we need to 'detect' and load them in a headless 
  browser. see: https://github.com/browserless/browserless 
@@ -55,6 +55,7 @@ import time
 import os
 import torch
 import subprocess
+import shutil
 
 from TTS.api import TTS
 from dotenv import load_dotenv
@@ -184,6 +185,7 @@ def setup_cache_dir() -> Path:
     else:
         base = Path.home() / f".{APP_NAME}"
 
+    debug_output("Creating Cache Directory")
     cache_dir = base / APP_CACHE_DIR
     cache_dir.mkdir(parents=True, exist_ok=True)
 
@@ -519,6 +521,22 @@ def tts(text_prompt, output_filename):
     )
     subprocess.run([ "ffmpeg", "-i", f"{output_filename}.wav", "-b:a", "64k", f"{output_filename}.mp3"], check=True)
 
+def remove_cache_after_this_date(caches_path: Path , day: datetime.datetime):
+
+    date_to_seek = day.strftime("%Y%m%d")
+    debug_output(f"Removing cache content older than {date_to_seek}")
+
+    directories_cleaned = 0
+    for child in caches_path.iterdir():
+        if not child.is_dir() or child.is_symlink():
+            continue
+        if date_to_seek in child.stem:
+            shutil.rmtree(child)
+            directories_cleaned += 1 
+
+    debug_output(f"Deleted {directories_cleaned} directories")
+    
+
 def main(config):
     global APP_NAME
     global APP_DEBUG_OUTPUT
@@ -542,15 +560,22 @@ def main(config):
     OLLAMA_RESERVED_OUTPUT      = int(os.getenv('OLLAMA_RESERVED_OUTPUT'))
     SAFE_INPUT_TOKENS = OLLAMA_MAX_CTX - OLLAMA_RESERVED_OUTPUT
 
-    cache_dir = setup_cache_dir() # installation step
     debug_output(f"Starting {APP_NAME} with configuration")
     debug_output(str(config))
+
+    cache_dir = setup_cache_dir() # installation step
 
     # 1. Go to Discord, read the given channel
     end_time            = datetime.datetime.now(datetime.UTC)
     start_time          = end_time - datetime.timedelta(days=config["days"])
     after_snowflake     = datetime_to_snowflake(start_time)
     before_snowflake    = datetime_to_snowflake(end_time)
+
+    # Delete cache over 30 days old
+    remove_cache_after_this_date(
+        cache_dir.parents[0],
+        end_time - datetime.timedelta(days=30)
+    )
 
     debug_output("Fetching discord messages...")
     discord_client = DiscordAPIClient()
@@ -560,6 +585,7 @@ def main(config):
     })
     debug_output(f"Retreived {len(messages)} messages from discord")
 
+    # We should show an exmple of our huginn Discord POST Bot 
     article_links = []
     for message in messages: 
         if message['author']['username'] != "Threat Intelligence Bot":
