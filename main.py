@@ -25,22 +25,11 @@ In this program We want to achieve the following:
 1. Go to Discord, read the given channel (of RSS feeds)
 2. For all articles read since our last run, visit the article link 
 3. Retrieve the full article content via http
-4. Summarize each article with AI; pay specific attention to:
-  - Named people/organizations
-  - Named Malwares 
-  - Indicators of Compromise (IOC)
-  - Severity of issue or finding
+4. Summarize each article with AI; extract actionable threat intelligence
 5. Each article summary should be written to cache
 6. An executive report should be generated and posted in a discord channel
 7. A 'Read aloud' MP3 file should be generated with the contents of 
  the executive summary.
-
-## Bugs and Features
-
-- [Bug] Some articles won't load via the 'requests' module, sites using ReactJS or 
- other such frameworks load all content from asynchronous calls after the initial
- page load. For such sites we need to 'detect' and load them in a headless 
- browser. see: https://github.com/browserless/browserless 
 """
 import sys
 import argparse
@@ -50,22 +39,24 @@ import datetime
 import threading
 import platform
 import re
-import tiktoken
 import time
 import os
-import torch
 import subprocess
 import shutil
 
-from TTS.api import TTS
-from dotenv import load_dotenv
-from pydantic import BaseModel
-from bs4 import BeautifulSoup
+import tiktoken
+import torch
+
 from pathlib import Path
 from urllib.parse import urlparse, unquote
-from ollama import chat
-from ollama import ChatResponse
 from contextlib import ExitStack
+
+from TTS.api import TTS
+from dotenv import load_dotenv
+from pydantic import BaseModel, Field, constr
+from typing import Literal
+from bs4 import BeautifulSoup
+from ollama import chat, ChatResponse
 
 APP_NAME="OllamaHugginBridge"
 APP_VERSION="0.0.1"
@@ -73,7 +64,7 @@ APP_CACHE_DIR="cache"
 APP_DEBUG_OUTPUT=False
 APP_DESCRIPTION="""\
 An AI (Ollama) digest of a Discord Message Channel devoted to collecting huggin\
- news articles. 
+ news articles. See the readme.md for more information. 
 """
 
 DISCORD_READ_CHANNEL_ID=1397390767009300531
@@ -85,42 +76,189 @@ OLLAMA_MAX_CTX=16384
 OLLAMA_RESERVED_OUTPUT=1024
 SAFE_INPUT_TOKENS = OLLAMA_MAX_CTX - OLLAMA_RESERVED_OUTPUT
 
-OLLAMA_ARTICLE_SUMMARY_PROMPT="""\
-Following this text you will receive an article in txt format.\
- Summarize the article content. The summary should be no more than 500\
- characters. pay specific attention to:
-  - Named organizations, and vendors
-  - Named Malwares. If none are named, leave this blank. 
-  - Indicators of Compromise (IOC): this can be an IP address, Domain name,\
- sha256 checksum, or filename. If none of those values are available leave this\
-  blank
-  - Severity of issue or finding
+OLLAMA_ARTICLE_SUMMARY_PROMPT="""
+You are a Cyber Security Researcher. Your job is to analyze threat intelligence
+articles, security news, and blog posts in order to extract the most relevant
+details for a Security Operations Center (SOC).
 
-ARTICLE CONTENT:
+## General Rules
+
+* Extract only information explicitly stated in the article.
+* Do not infer threat actors, malware, vulnerabilities, victims, or IOCs.
+* Do not use knowledge outside the article contents.
+* If uncertain, omit the value.
+* Prefer precision over recall.
+* Deduplicate all extracted values.
+* If no values are found for a list field, return an empty list.
+* Never return placeholder values such as "Unknown", "N/A", or
+  "Not Mentioned".
+* Ignore navigation menus, tags, related articles, advertisements,
+  and site metadata.
+
+## Summary
+
+summary:
+
+* Maximum 500 characters.
+* Use a concise, factual, and impartial tone.
+* Avoid unsupported conclusions, industry trends, predictions,
+  or speculation.
+
+## Extract Relevant Data
+
+vendor_organization:
+
+* Names of software vendors, cybersecurity vendors, and organizations
+  mentioned in the article.
+
+threat_actor_list:
+
+* Named threat actors, APT groups, intrusion sets, and criminal groups.
+
+ioc_list:
+
+* Only include IOCs explicitly present in the article text.
+* Do NOT generate placeholder IOC entries.
+* Do NOT output empty values.
+* Do NOT output IOC types unless a real value is present.
+* If no IOC exists for a type, omit it entirely.
+* Each IOC object must contain a real extracted value.
+* Assign confidence:
+
+  * high: explicitly attributed to malicious activity
+  * medium: likely malicious but attribution is indirect
+  * low: mentioned with uncertainty or weak evidence
+
+ttp_list:
+
+* Short description of attacker techniques, procedures, or tools.
+* Maximum 100 characters per entry.
+
+malware_list:
+
+* Named malware families, implants, loaders, trojans, ransomware,
+  and backdoors.
+* Do not include security tools, administration tools, penetration
+  testing tools, or frameworks unless the article explicitly identifies
+  them as malware.
+
+vulnerability_list:
+
+* Only include vulnerabilities with a valid CVE identifier.
+* Ignore vulnerability names without an associated CVE.
+
+severity:
+
+* Assess severity using only information contained in the article.
+* critical: active widespread exploitation, ransomware campaigns,
+  nation-state activity, or critical infrastructure impact
+* high: confirmed exploitation or significant organizational risk
+* medium: credible threat activity without widespread exploitation
+* low: informational, historical, research, or low-impact content
 """
 
 OLLAMA_EXECUTIVE_SUMMARY_PROMPT="""\
-Following this text you will receive a list of article summaries in txt format.\
- Each article summary is separated by two new line characters (\\n). Draft an\
- executive summary of all the articles, grouping them by theme, and highlighting\
- the most critical. Skip any summaries that appear to be junk, make no mention\
- of them. 
+You are a senior cybersecurity news editor preparing the Daily Update script \
+ for a professional news broadcast.
 
-Criticality is defined by the impact of not addressing a vulnerability \
- multiplied by it's likelihood of being exploited. Positive stories, and \
- advisories about software updates (unless specifically addressing a \
- vulnerability) should be treated as non-critical. 
+You will receive multiple cybersecurity and technology news article summaries.
 
- The executive summary should be 
- - 600 words long, at maximum.
- - formulated as a 'speech' that would be read by a News Caster. This means \
- short paragraphs, in active voice. Don't use any markdown formatting, \
- bold or italics, or html tags. 
- - Always begin the summary output with "Today in CyberSecurity,"
- - Never contain URLs or SHA256 hash data, since it is unnatural to speak those\
- aloud. 
+Each article summary is separated by two newline characters (\\n\\n).
 
- ARTICLE SUMMARIES:
+Your task is to synthesize the material into a concise broadcast script that\
+ will be read aloud by a news presenter.
+
+## Requirements
+
+* Maximum length: 600 words.
+* Write as a teleprompter script intended for spoken delivery.
+* Use clear, concise, active voice.
+* Use short paragraphs of one to three sentences.
+* Maintain a professional newsroom tone.
+* Do not use markdown, HTML, bullet points, headings, bold text, or italics.
+* Expand all acronyms. For example, "Indicator of Compromise" instead of "IOC".
+* Never include URLs, file paths, IP addresses, hash values, or other\ 
+ machine-readable artifacts that sound unnatural when spoken aloud.
+* Begin the script exactly with:
+  Today in CyberSecurity,
+
+## Editorial Guidelines
+
+* Do not make broad claims about industry-wide trends, attacker behavior, or\
+ the cybersecurity landscape unless those claims are directly supported by\ 
+ the provided articles.
+* Do not infer conclusions that are not explicitly supported by the source\ 
+ material.
+* Avoid speculation about future attacks, future impacts, or future\ 
+ industry developments.
+* Avoid generic news-anchor commentary and dramatic language.
+* Do not use phrases such as:
+
+  * "the stakes have never been higher"
+  * "organizations must remain vigilant"
+  * "the threat landscape continues to evolve"
+  * "cybersecurity remains a top priority"
+  * "only time will tell"
+  * "this serves as a reminder"
+  * "a wake-up call"
+  * "an ever-changing threat landscape"
+* Focus on reporting concrete facts, actions, impacts, and outcomes described\ 
+ in the articles.
+* When summarizing multiple stories, prefer specific details over broad\ 
+ conclusions.
+* Do not add a moral, lesson, or editorial opinion at the end of the broadcast.
+
+
+Content Selection
+
+* Merge duplicate stories covering the same event into a single segment.
+* Group related stories together naturally.
+* Prioritize stories according to their real-world impact.
+* If all stories cannot be covered within the word limit, summarize \
+ lower-priority stories briefly or omit them.
+
+Story Prioritization
+
+Highest Priority
+
+* Actively exploited vulnerabilities.
+* Vulnerabilities listed in Known Exploited Vulnerabilities catalogues.
+* Vulnerabilities for which proof of concept exploit code exists. 
+* Remote code execution vulnerabilities with evidence of exploitation.
+* Major ransomware campaigns.
+* Large-scale data breaches.
+* Significant nation-state activity.
+* Incidents affecting critical infrastructure.
+
+Medium Priority
+
+* High-severity vulnerabilities without confirmed exploitation.
+* Emerging malware campaigns.
+* Significant defensive innovations.
+* Important vendor security advisories.
+
+Lower Priority
+
+* Product announcements.
+* Minor software updates.
+* Industry commentary.
+* Research findings without immediate operational impact.
+
+Output Structure
+
+1. Open with the most critical cybersecurity developments.
+2. Continue with major threat activity, breaches, and vulnerability news.
+3. Cover defensive measures, research, and industry developments.
+4. End with a brief closing sentence summarizing the day's security landscape.
+
+The final output must read naturally as a single news broadcast and must never\
+ mention article summaries, source material, researchers, or editorial\ 
+ decisions.
+"""
+
+DOCUMENT_DISCLAIMER="""\
+**This document is Generated by Artificial Intelligence (AI). Accuracy is not \
+ guaranteed.**\n\n
 """
 
 def parse_arguments() -> dict:
@@ -331,7 +469,7 @@ class DiscordAPIClient():
 
             response = requests.post(
                 f"https://discord.com/api/v10/channels/{DISCORD_WRITE_CHANNEL_ID}/messages",
-                data={"content": "Your files, as requested"}, 
+                data={"content": "Your files, as requested."}, 
                 files=files, 
                 headers=self.headers
             )
@@ -389,12 +527,46 @@ class ArticleLookupTool(threading.Thread):
                 fhandle.write(response_txt)
                 fhandle.close()
 
+class IOC(BaseModel):
+    type: Literal[
+        "ipv4",
+        "ipv6",
+        "domain",
+        "url",
+        "email",
+        "sha1",
+        "sha256",
+        "md5"
+    ]
+    value: constr(min_length=1)
+    confidence: Literal["low", "medium", "high"]
+
+# Todo: Add Vulnerability Lookup Tool. 
+# for example: 
+# - To cross reference KEV list 
+# - To get detailed vulnerability references from CVE Details. 
+# - To get CVSS scores when not mentioned. 
+# - To determine if Proof Of Concept code is available. 
+class Vulnerability(BaseModel):
+    software_name: str
+    cve_id: str
+    cvss_score: float = None
+
+# Todo: Map TTP descriptions to MITRE ATT&CK
+# https://attack.mitre.org/versions/v19/
+class TTP(BaseModel):
+    technique_id: str = None
+    technique_name: str = None
+    description: str
+
 class Article(BaseModel):
-    organizations: list[str]
-    vendors: list[str]
-    iocs: list[str]
-    malwares: list[str]
-    severity: str
+    vendor_organizations: list[str] = Field(default_factory=list)
+    threat_actor_list: list[str] = Field(default_factory=list)
+    ioc_list: list[IOC] = Field(default_factory=list)
+    ttp_list: list[TTP] = Field(default_factory=list)
+    malware_list: list[str] = Field(default_factory=list)
+    vulnerability_list: list[Vulnerability] = Field(default_factory=list)
+    severity: Literal["low", "medium", "high", "critical"]
     summary: str
 
 def summarize_articles(config: dict, session_cache_dir_articles: Path, session_cache_dir_summaries: Path):
@@ -407,6 +579,7 @@ def summarize_articles(config: dict, session_cache_dir_articles: Path, session_c
     does. 
     """
     encoding = tiktoken.get_encoding("cl100k_base")
+    article_summaries = []
     for article_content_path in session_cache_dir_articles.iterdir():
         article_content_raw = ""
         with open(article_content_path, 'r', encoding="utf8") as fhandle:
@@ -415,26 +588,24 @@ def summarize_articles(config: dict, session_cache_dir_articles: Path, session_c
 
         article_url   = article_content_raw.split("\n")[0][12:]
         article_title = article_content_raw.split("\n")[1][14:]
-        
         article_content = "\n".join(article_content_raw.split("\n")[2:])
 
-        prompt = f"{OLLAMA_ARTICLE_SUMMARY_PROMPT}\n\n{article_content}"
-        prompt_tokens = len(encoding.encode(prompt))
-
-        if prompt_tokens > SAFE_INPUT_TOKENS:
+        if len(encoding.encode(OLLAMA_ARTICLE_SUMMARY_PROMPT + article_content)) > SAFE_INPUT_TOKENS:
             article_content = truncate_to_token_limit(
                 article_content,
-                SAFE_INPUT_TOKENS // 2
+                SAFE_INPUT_TOKENS - len(encoding.encode(OLLAMA_ARTICLE_SUMMARY_PROMPT))
             )
+        
         debug_output(f"Summarizing Article: {article_title}")
-        prompt = f"{OLLAMA_ARTICLE_SUMMARY_PROMPT}\n\n{article_content}"
+        user_prompt = f"#Article Summary:\n\n{article_content}"
+
         now = datetime.datetime.now()
         response: ChatResponse = chat(
             model=config['model_name'], 
-            messages=[{
-            'role': 'user', 
-            'content': prompt,
-            }],
+            messages=[
+                {'role': 'system', 'content': OLLAMA_ARTICLE_SUMMARY_PROMPT},
+                {'role': 'user', 'content': user_prompt}
+            ],
             format=Article.model_json_schema(),
             think=False,
             options={
@@ -446,16 +617,20 @@ def summarize_articles(config: dict, session_cache_dir_articles: Path, session_c
         delta = then - now 
         debug_output(f"Ran for {delta} seconds")
 
+        # Add META content
         article = Article.model_validate_json(response.message.content)
         article_dict = article.model_dump()
         article_dict['url'] = article_url
         article_dict['title'] = article_title
+        article_summaries.append(article_dict)
 
         # 5. Each article summary should be written to cache
         summary_filename = session_cache_dir_summaries / f"summary-{article_content_path.parts[-1][:-4]}.json"
         with open(summary_filename, 'w', encoding="utf8") as fhandle:
             json.dump(article_dict, fhandle, indent=2)
             fhandle.close()
+        
+    return article_summaries
 
 def executive_summary(config: dict, session_cache_dir_summaries: Path) -> str:
     # 6. An executive report should be generated and posted in a discord channel
@@ -469,44 +644,56 @@ def executive_summary(config: dict, session_cache_dir_summaries: Path) -> str:
             article_summaries  += f"{article_summary_content}\n\n"
             fhandle.close()
 
-    prompt = f"{OLLAMA_EXECUTIVE_SUMMARY_PROMPT}\n\n{article_summaries}"
-    prompt_tokens = len(encoding.encode(prompt))
-
-    if prompt_tokens > SAFE_INPUT_TOKENS:
+    if len(encoding.encode(OLLAMA_EXECUTIVE_SUMMARY_PROMPT + article_summaries)) > SAFE_INPUT_TOKENS:
         article_summaries = truncate_to_token_limit(
             article_summaries,
-            SAFE_INPUT_TOKENS // 2
+            SAFE_INPUT_TOKENS - len(encoding.encode(OLLAMA_EXECUTIVE_SUMMARY_PROMPT))
         )
+        
+    user_prompt = f"# Articles:\n\n{article_summaries}"
 
-    prompt = f"{OLLAMA_EXECUTIVE_SUMMARY_PROMPT}\n\n{article_summaries}"
     now = datetime.datetime.now()
     response: ChatResponse = chat(
         model=config['model_name'], 
-        messages=[{
-            'role': 'user', 
-            'content': prompt,
-        }],
+        messages=[
+            { 'role': 'system', 'content': OLLAMA_EXECUTIVE_SUMMARY_PROMPT }, 
+            { 'role': 'user', 'content': user_prompt}
+        ],
         think=False,
         options={
             "num_ctx": 16384,
-            "temperature": 0
+            "temperature": 0.3
         }
     )
+
     then = datetime.datetime.now()
     delta = then - now 
     debug_output(f"Ran for {delta} seconds")
+
     return response.message.content
 
-def get_meta_from_article_summaries(session_cache_dir_summaries: Path) -> list:
-    reference_list = []
-    ioc_list = []
+def get_further_reading_section(session_cache_dir_summaries: Path) -> list:
+    further_reading = "\n\n# Further Reading\n"
     for article_summary_path in session_cache_dir_summaries.iterdir():
         with open(article_summary_path, 'r', encoding="utf8") as fhandle:
             summary_json = json.loads(fhandle.read())
-            reference_list.append(summary_json['url'])
-            ioc_list += summary_json['iocs']
+
+            further_reading += f"## [{summary_json['title']}]({summary_json['url']})\n"
+            further_reading += f"*Severity*: {summary_json['severity']}\n\n"
+            further_reading += summary_json['summary'] + "\n\n"
+            if len(summary_json['ioc_list']):
+                further_reading += "\n\n|IOC Value|Type|Confidence\n|---|---|---|\n"
+                for ioc in summary_json['ioc_list']:
+                    further_reading += f"|{ioc['value']}|{ioc['type']}|{ioc['confidence']}|\n"
+
+            if len(summary_json['vulnerability_list']):
+                further_reading += "\n\n|Vulnerability|Software|\n|---|---|\n"
+                for vuln in summary_json['vulnerability_list']:
+                    further_reading += f"|{vuln['cve_id']}|{vuln['software_name']}|\n"
+            
             fhandle.close()
-    return {'ref': reference_list, 'ioc': ioc_list }
+ 
+    return (further_reading)
 
 def tts(text_prompt, output_filename):
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -521,21 +708,24 @@ def tts(text_prompt, output_filename):
     )
     subprocess.run([ "ffmpeg", "-i", f"{output_filename}.wav", "-b:a", "64k", f"{output_filename}.mp3"], check=True)
 
-def remove_cache_after_this_date(caches_path: Path , day: datetime.datetime):
-
-    date_to_seek = day.strftime("%Y%m%d")
-    debug_output(f"Removing cache content older than {date_to_seek}")
-
+def remove_cache_after_this_date(caches_path: Path, day: datetime.datetime):
+    debug_output(f"Removing cache content older than {day:%Y-%m-%d %H:%M:%S}")
     directories_cleaned = 0
     for child in caches_path.iterdir():
         if not child.is_dir() or child.is_symlink():
             continue
-        if date_to_seek in child.stem:
+
+        try:
+            cache_date = datetime.datetime.strptime(child.stem, "%Y%m%d%H%M%S")
+            cache_date = cache_date.replace(tzinfo=day.tzinfo)
+        except ValueError:
+            continue
+
+        if cache_date < day:
             shutil.rmtree(child)
-            directories_cleaned += 1 
+            directories_cleaned += 1
 
     debug_output(f"Deleted {directories_cleaned} directories")
-    
 
 def main(config):
     global APP_NAME
@@ -573,7 +763,7 @@ def main(config):
 
     # Delete cache over 30 days old
     remove_cache_after_this_date(
-        cache_dir.parents[0],
+        cache_dir,
         end_time - datetime.timedelta(days=30)
     )
 
@@ -585,7 +775,6 @@ def main(config):
     })
     debug_output(f"Retreived {len(messages)} messages from discord")
 
-    # We should show an exmple of our huginn Discord POST Bot 
     article_links = []
     for message in messages: 
         if message['author']['username'] != "Threat Intelligence Bot":
@@ -618,7 +807,7 @@ def main(config):
             cache_dir=session_cache_dir_articles
         )
     # 3. Retrieve the full article content 
-    debug_output("Running multi-threaded article lookups")
+    debug_output(f"Running multi-threaded article lookups with max_threads={max_threads}")
     thread_manager.run_all()
 
     # 4. At this point articles are all stored as 'txt' files, 
@@ -634,6 +823,7 @@ def main(config):
     debug_output(f"Generating Final Executive Summary")
     exec_summary = executive_summary(config, session_cache_dir_summaries)
 
+
     exec_summary_filename = cache_dir / str(end_time.strftime("%Y%m%d%H%M%S")) / 'exec-summary' 
     exec_summary_final = exec_summary[exec_summary.find("</think>")+8:]
     exec_summary_think = exec_summary[exec_summary.find("<think>")+7:exec_summary.find("</think>")]
@@ -644,22 +834,16 @@ def main(config):
 
     tts(exec_summary_final, exec_summary_filename)
 
-    article_meta = get_meta_from_article_summaries(session_cache_dir_summaries)
-    exec_summary_final += "\n\nReferences:\n"
-    for ref in article_meta['ref']:
-        exec_summary_final += f"{ref}\n"
-
-    exec_summary_final += "\n\nIOCs:\n"
-    for ioc in article_meta['ioc']:
-        exec_summary_final += f"{ioc}\n"
-
-    with open(f'{exec_summary_filename}.txt', 'w', encoding="utf8") as fhandle:
+    # Write The Executive Summary to Disk
+    further_reading = get_further_reading_section(session_cache_dir_summaries)
+    exec_summary_final =f"{DOCUMENT_DISCLAIMER}# Executive Summary\n\n" + exec_summary_final + further_reading 
+    with open(f'{exec_summary_filename}.md', 'w', encoding="utf8") as fhandle:
         fhandle.write(exec_summary_final)
         fhandle.close()
 
     debug_output(f"Sending Executive Summary to Discord Channel")
     discord_client.send_attachments([
-        f"{exec_summary_filename}.txt", f"{exec_summary_filename}.mp3"
+        f"{exec_summary_filename}.md", f"{exec_summary_filename}.mp3"
     ])
 
 if __name__ == "__main__":
