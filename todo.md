@@ -5,16 +5,17 @@
  page load. For such sites we need to 'detect' and load them in a headless 
  browser. see: https://github.com/browserless/browserless 
 
-- [Feat] Move prompts and `.env` to the `%APP_DATA%` installation directory
+- -[Feat] Move prompts and `.env` to the `%APP_DATA%` installation directory
  in order to make the system prompts editable for the user and per the 
- program instance. 
+ program instance.-
  - [Feat] Once the above Feat is complete, create a configuration wizard tool 
   for easier onboarding of new users. 
 
 - [Bug] [Audio Generation] We are voice Cloning on each run: cloning the voice 
  once, and storing the voice in the installation directory would be more optimal
 
-- [Feat] Add a CVE lookup tool to enrich Vulnerability Information
+- [Feat] Add a CVE lookup tool to enrich Vulnerability Information ** \
+ consider https://docs.opencve.io/
 
 - [Feat] Add a Main database. Maintain a SQlite3 database of Article URLs,
  titles, and descriptions, and published_at dates. As well as IOC values. 
@@ -25,3 +26,4 @@
 - [Feat] Article 'Business Vertical' (try to determine the business vertical 
  affected by the Article. Certain threats are industry specific, and people 
  are interested in their industry vertical specifically.  
+

@@ -43,6 +43,7 @@ import time
 import os
 import subprocess
 import shutil
+import sqlite3
 
 import tiktoken
 import torch
@@ -60,7 +61,6 @@ from ollama import chat, ChatResponse
 
 APP_NAME="OllamaHugginBridge"
 APP_VERSION="0.0.1"
-APP_CACHE_DIR="cache"
 APP_DEBUG_OUTPUT=False
 APP_DESCRIPTION="""\
 An AI (Ollama) digest of a Discord Message Channel devoted to collecting huggin\
@@ -273,40 +273,7 @@ def parse_arguments() -> dict:
         help="Amount of days prior to today to include in the process."
     )
 
-    parser.add_argument(
-        "--max-threads",
-        type=int,
-        required=False,
-        default=4,
-        help="Maximum number of threads that can run concurrently when reading articles"
-    )
-
-    parser.add_argument(
-        "--thread-timeout",
-        type=int,
-        required=False,
-        default=30,
-        help="Maximum timeout value for thread"
-    )
-
-    parser.add_argument(
-        "--model-name",
-        type=str,
-        required=False,
-        default="qwen3:4b",
-        help="The name of the Ollama Model, default is qwen3.6"
-    )
-
-    parser.add_argument(
-        "--debug-output",
-        type=bool,
-        required=False,
-        default=False,
-        help="Send debug ouput to the CLI"
-    )
-
     args = parser.parse_args()
-
     return vars(args)
 
 def debug_output(message, error=False):
@@ -317,17 +284,126 @@ def debug_output(message, error=False):
     else:
         sys.stderr.write(f"{message}\n")
 
-def setup_cache_dir() -> Path:
+def get_installation_path() -> Path:
     if platform.system() == "Windows":
         base = Path.home() / "AppData" / "Local" / APP_NAME
     else:
         base = Path.home() / f".{APP_NAME}"
+    return base
 
+def setup_self() -> Path:
+    base = get_installation_path()
+    base.mkdir(parents=True, exist_ok=True)
+    return base
+
+def setup_cache_dir() -> Path:
     debug_output("Creating Cache Directory")
-    cache_dir = base / APP_CACHE_DIR
+    cache_dir = get_installation_path() / "cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
-
     return cache_dir
+
+def setup_dotenv():
+    env = get_installation_path() / ".env"
+    if env.is_file():
+        load_dotenv(dotenv_path=env)
+    else:
+        print(f"This is your first time using {APP_NAME}")
+        print(f"Please Update the file at {env} to configure the application")
+        env_example = ""
+        with open(".env.example", 'r', encoding="utf8") as fhandle1:
+            env_example = fhandle1.read()
+            fhandle1.close()
+        with open(env, 'w', encoding='utf8') as fhandle2:
+            fhandle2.write(env_example)
+            fhandle2.close()
+        return sys.exit(0)
+
+def setup_database():
+    schema = """
+        CREATE TABLE IF NOT EXISTS articles(
+            id INTEGER PRIMARY KEY,
+            provider TEXT NOT NULL,
+            title VARCHAR(255) DEFAULT NULL,
+            url TEXT NOT NULL UNIQUE,
+            content TEXT DEFAULT NULL,
+            fetched_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS article_summaries(
+            id INTEGER PRIMARY KEY, 
+            article_id INTEGER NOT NULL UNIQUE,
+            content TEXT DEFAULT NULL, 
+            reasoning TEXT DEFAULT NULL, 
+            json TEXT DEFAULT NULL,
+            FOREIGN KEY (article_id)
+                REFERENCES articles(id)
+                ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_articles_fetched_at
+            ON articles(fetched_at);
+
+        CREATE TABLE IF NOT EXISTS iocs(
+            id INTEGER PRIMARY KEY,
+            article_id INTEGER NOT NULL,
+            value TEXT NOT NULL,
+            confidence TEXT NOT NULL,
+            type TEXT NOT NULL,
+            added_on DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+            FOREIGN KEY (article_id)
+                REFERENCES articles(id)
+                ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_iocs_article_id
+            ON iocs(article_id);
+
+        CREATE INDEX IF NOT EXISTS idx_iocs_value
+            ON iocs(value);
+
+        CREATE INDEX IF NOT EXISTS idx_iocs_type
+            ON iocs(type);
+    """
+
+    db_path = get_installation_path() / "database.sqlite"
+    connection = sqlite3.connect(db_path)
+    cursor = connection.cursor()
+    cursor.executescript(schema)
+    connection.commit()
+    return connection
+
+def get_db_connection():
+    db_path = get_installation_path() / "database.sqlite"
+    connection = sqlite3.connect(db_path)
+    return connection
+
+def setup_system_prompts():
+    global OLLAMA_ARTICLE_SUMMARY_PROMPT
+    global OLLAMA_EXECUTIVE_SUMMARY_PROMPT
+
+    base_path = get_installation_path()
+    summary_prompt = base_path / "article-summary-prompt.md"
+    executive_prompt = base_path / "executive-summary-prompt.md"
+
+    if summary_prompt.is_file():
+        with open(summary_prompt, 'r', encoding="utf8") as fhandle1:
+            OLLAMA_ARTICLE_SUMMARY_PROMPT = fhandle1.read()
+            fhandle1.close()
+    else:
+        with open(summary_prompt, 'w', encoding="utf8") as fhandle1:
+            fhandle1.write(OLLAMA_ARTICLE_SUMMARY_PROMPT)
+            fhandle1.close()
+    
+    if executive_prompt.is_file():
+        with open(executive_prompt, 'r', encoding="utf8") as fhandle2:
+            OLLAMA_EXECUTIVE_SUMMARY_PROMPT = fhandle2.read()
+            fhandle2.close()
+    else:
+        with open(executive_prompt, 'w', encoding="utf8") as fhandle2:
+            fhandle2.write(OLLAMA_EXECUTIVE_SUMMARY_PROMPT)
+            fhandle2.close()
+
 
 def datetime_to_snowflake(dt: datetime.datetime) -> int:
     unix_ms = int(dt.timestamp() * 1000)
@@ -344,6 +420,39 @@ def url_to_filename(url: str, max_length: int = 150) -> str:
         safe_name = "default_filename"
 
     return safe_name[:max_length]
+
+def remove_cache_after_this_date(caches_path: Path, day: datetime.datetime):
+    debug_output(f"Removing cache content older than {day:%Y-%m-%d %H:%M:%S}")
+    directories_cleaned = 0
+    for child in caches_path.iterdir():
+        if not child.is_dir() or child.is_symlink():
+            continue
+
+        try:
+            cache_date = datetime.datetime.strptime(child.stem, "%Y%m%d%H%M%S")
+            cache_date = cache_date.replace(tzinfo=day.tzinfo)
+        except ValueError:
+            continue
+
+        if cache_date < day:
+            shutil.rmtree(child)
+            directories_cleaned += 1
+
+    debug_output(f"Deleted {directories_cleaned} directories")
+
+def deduplicate_article_links(db_con, article_links) -> list:
+    db_cur = db_con.cursor()
+    deduplicated_article_links = []
+    for article_link in article_links:
+        sql_to_exec = "SELECT id FROM articles WHERE url = :url;"
+        db_cur.execute(sql_to_exec, article_link)
+        match_result = db_cur.fetchone()
+        if match_result:
+            debug_output(f"{article_link['url']} was already reported on")
+        else:
+            deduplicated_article_links.append(article_link)
+    return deduplicated_article_links
+
 
 def extract_article_content(html: str) -> str:
     soup = BeautifulSoup(html, 'html.parser')
@@ -479,13 +588,12 @@ class ThreadManager():
         self.semaphore = threading.Semaphore(max_concurrent_threads)
         self.threads: list[ArticleLookupTool] = []
 
-    def add_task(self, url: str, title: str, timeout: int, cache_dir: Path):
+    def add_task(self, url: str, title: str, timeout: int):
 
         thread = ArticleLookupTool(
             url=url, 
             title=title,
             timeout=timeout, 
-            cache_dir=cache_dir, 
             semaphore=self.semaphore
         )
         self.threads.append(thread)
@@ -506,26 +614,34 @@ class ArticleLookupTool(threading.Thread):
     """
         Tool designed to read articles
     """
-    def __init__(self, url: str, title: str, timeout: int, cache_dir: Path, semaphore: threading.Semaphore):
+    def __init__(self, url: str, title: str, timeout: int, semaphore: threading.Semaphore):
         super().__init__()
         self.url        = url
         self.title      = title 
-        self.filename   = cache_dir / f"{url_to_filename(url)}.txt"
         self.timeout    = timeout
         self.semaphore  = semaphore
 
     def run(self):
         with self.semaphore: 
+            db_con     = get_db_connection()
+            db_cur     = db_con.cursor()
             response = requests.get(self.url, timeout=self.timeout, headers={
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:150.0) Gecko/20100101 Firefox/150.0"
             })
             response_html = response.text
             response_txt  = extract_article_content(response_html)
-            with open(self.filename, 'w', encoding="utf8") as fhandle:
-                fhandle.write(f"Article URL:{self.url}\n")
-                fhandle.write(f"Article Title:{self.title}\n\n")
-                fhandle.write(response_txt)
-                fhandle.close()
+
+            db_cur.execute("""
+                INSERT INTO articles(provider, title, url, content, fetched_at) 
+                VALUES (:provider, :title, :url, :content, :fetched_at);
+            """, {
+                "provider": urlparse(self.url).netloc,
+                "title": self.title,
+                "url": self.url,
+                "content": response_txt,
+                "fetched_at": datetime.datetime.now()
+            })
+            db_con.commit()
 
 class IOC(BaseModel):
     type: Literal[
@@ -569,7 +685,7 @@ class Article(BaseModel):
     severity: Literal["low", "medium", "high", "critical"]
     summary: str
 
-def summarize_articles(config: dict, session_cache_dir_articles: Path, session_cache_dir_summaries: Path):
+def summarize_articles(start_time, end_time):
     """4. Summarize each article with AI; pay specific attention to:
       - Named people/organizations
       - Named Malwares 
@@ -578,33 +694,41 @@ def summarize_articles(config: dict, session_cache_dir_articles: Path, session_c
     To assure the prompt doesn't exceed the context window, we truncate if it 
     does. 
     """
+    db_con = get_db_connection()
+    db_cur = db_con.cursor()
+    db_cur.execute("""
+        SELECT a.id, a.content, a.title, a.url
+        FROM articles a
+        WHERE
+            a.fetched_at BETWEEN :start_time AND :end_time
+            AND NOT EXISTS (
+                SELECT 1
+                FROM article_summaries s
+                WHERE s.article_id = a.id
+            );    
+    """, {"start_time": start_time, "end_time": end_time})
+    article_contents = db_cur.fetchall()
+
     encoding = tiktoken.get_encoding("cl100k_base")
-    article_summaries = []
-    for article_content_path in session_cache_dir_articles.iterdir():
-        article_content_raw = ""
-        with open(article_content_path, 'r', encoding="utf8") as fhandle:
-            article_content_raw = fhandle.read()
-            fhandle.close()
+    for article_content in article_contents:
+        article_content_id  = article_content[0]
+        article_content_raw = article_content[1]
+        article_title       = article_content[2]
+        article_url         = article_content[3]
 
-        article_url   = article_content_raw.split("\n")[0][12:]
-        article_title = article_content_raw.split("\n")[1][14:]
-        article_content = "\n".join(article_content_raw.split("\n")[2:])
-
-        if len(encoding.encode(OLLAMA_ARTICLE_SUMMARY_PROMPT + article_content)) > SAFE_INPUT_TOKENS:
-            article_content = truncate_to_token_limit(
+        if len(encoding.encode(OLLAMA_ARTICLE_SUMMARY_PROMPT + article_content_raw)) > SAFE_INPUT_TOKENS:
+            article_content_raw = truncate_to_token_limit(
                 article_content,
                 SAFE_INPUT_TOKENS - len(encoding.encode(OLLAMA_ARTICLE_SUMMARY_PROMPT))
             )
         
         debug_output(f"Summarizing Article: {article_title}")
-        user_prompt = f"#Article Summary:\n\n{article_content}"
-
         now = datetime.datetime.now()
         response: ChatResponse = chat(
-            model=config['model_name'], 
+            model=os.getenv('OLLAMA_MODEL_NAME'), 
             messages=[
                 {'role': 'system', 'content': OLLAMA_ARTICLE_SUMMARY_PROMPT},
-                {'role': 'user', 'content': user_prompt}
+                {'role': 'user', 'content': article_content_raw}
             ],
             format=Article.model_json_schema(),
             think=False,
@@ -617,32 +741,50 @@ def summarize_articles(config: dict, session_cache_dir_articles: Path, session_c
         delta = then - now 
         debug_output(f"Ran for {delta} seconds")
 
-        # Add META content
         article = Article.model_validate_json(response.message.content)
         article_dict = article.model_dump()
         article_dict['url'] = article_url
         article_dict['title'] = article_title
-        article_summaries.append(article_dict)
 
-        # 5. Each article summary should be written to cache
-        summary_filename = session_cache_dir_summaries / f"summary-{article_content_path.parts[-1][:-4]}.json"
-        with open(summary_filename, 'w', encoding="utf8") as fhandle:
-            json.dump(article_dict, fhandle, indent=2)
-            fhandle.close()
+        db_cur.execute(""" 
+            INSERT INTO article_summaries(
+                article_id, 
+                content,
+                json
+            ) VALUES (
+                :article_id,
+                :content,
+                :json
+            );
+        """, {
+            "article_id": article_content_id,
+            "content": article_dict['summary'],
+            "json": json.dumps(article_dict)
+        })
+        db_con.commit()
+
         
-    return article_summaries
 
-def executive_summary(config: dict, session_cache_dir_summaries: Path) -> str:
+def executive_summary(start_time, end_time) -> str:
     # 6. An executive report should be generated and posted in a discord channel
     encoding = tiktoken.get_encoding("cl100k_base")
 
+    db_con = get_db_connection()
+    db_cur = db_con.cursor()
+    db_cur.execute(""" 
+        SELECT s.content, a.title 
+        FROM article_summaries s 
+        JOIN articles a ON (s.article_id = a.id)
+        WHERE a.fetched_at BETWEEN :start_time AND :end_time;
+    """, {
+        "start_time": start_time,
+        "end_time": end_time
+    })
+    article_summaries_rs = db_cur.fetchall()
+
     article_summaries = ""
-    for article_summary_path in session_cache_dir_summaries.iterdir():
-        with open(article_summary_path, 'r', encoding="utf8") as fhandle:
-            summary_json = json.loads(fhandle.read())
-            article_summary_content = summary_json['summary']
-            article_summaries  += f"{article_summary_content}\n\n"
-            fhandle.close()
+    for article_summary_rs in article_summaries_rs:
+        article_summaries += f"# {article_summary_rs[1]}\n\n{article_summary_rs[0]}\n\n"
 
     if len(encoding.encode(OLLAMA_EXECUTIVE_SUMMARY_PROMPT + article_summaries)) > SAFE_INPUT_TOKENS:
         article_summaries = truncate_to_token_limit(
@@ -650,14 +792,12 @@ def executive_summary(config: dict, session_cache_dir_summaries: Path) -> str:
             SAFE_INPUT_TOKENS - len(encoding.encode(OLLAMA_EXECUTIVE_SUMMARY_PROMPT))
         )
         
-    user_prompt = f"# Articles:\n\n{article_summaries}"
-
     now = datetime.datetime.now()
     response: ChatResponse = chat(
-        model=config['model_name'], 
+        model=os.getenv("OLLAMA_MODEL_NAME"), 
         messages=[
             { 'role': 'system', 'content': OLLAMA_EXECUTIVE_SUMMARY_PROMPT }, 
-            { 'role': 'user', 'content': user_prompt}
+            { 'role': 'user', 'content': article_summaries}
         ],
         think=False,
         options={
@@ -672,26 +812,36 @@ def executive_summary(config: dict, session_cache_dir_summaries: Path) -> str:
 
     return response.message.content
 
-def get_further_reading_section(session_cache_dir_summaries: Path) -> list:
+def get_further_reading_section(start_time, end_time) -> list:
+    db_con = get_db_connection()
+    db_cur = db_con.cursor()
+    db_cur.execute(""" 
+        SELECT s.json 
+        FROM article_summaries s
+        JOIN articles a ON (s.article_id = a.id)
+        WHERE a.fetched_at BETWEEN :start_time AND :end_time;
+    """, {
+        "start_time": start_time,
+        "end_time": end_time
+    })
+    article_summary_rs = db_cur.fetchall()
+
     further_reading = "\n\n# Further Reading\n"
-    for article_summary_path in session_cache_dir_summaries.iterdir():
-        with open(article_summary_path, 'r', encoding="utf8") as fhandle:
-            summary_json = json.loads(fhandle.read())
+    for article_summary in article_summary_rs:
+        summary_json = json.loads(article_summary[0])
 
-            further_reading += f"## [{summary_json['title']}]({summary_json['url']})\n"
-            further_reading += f"*Severity*: {summary_json['severity']}\n\n"
-            further_reading += summary_json['summary'] + "\n\n"
-            if len(summary_json['ioc_list']):
-                further_reading += "\n\n|IOC Value|Type|Confidence\n|---|---|---|\n"
-                for ioc in summary_json['ioc_list']:
-                    further_reading += f"|{ioc['value']}|{ioc['type']}|{ioc['confidence']}|\n"
+        further_reading += f"## [{summary_json['title']}]({summary_json['url']})\n"
+        further_reading += f"*Severity*: {summary_json['severity']}\n\n"
+        further_reading += summary_json['summary'] + "\n\n"
+        if len(summary_json['ioc_list']):
+            further_reading += "\n\n|IOC Value|Type|Confidence\n|---|---|---|\n"
+            for ioc in summary_json['ioc_list']:
+                further_reading += f"|{ioc['value']}|{ioc['type']}|{ioc['confidence']}|\n"
 
-            if len(summary_json['vulnerability_list']):
-                further_reading += "\n\n|Vulnerability|Software|\n|---|---|\n"
-                for vuln in summary_json['vulnerability_list']:
-                    further_reading += f"|{vuln['cve_id']}|{vuln['software_name']}|\n"
-            
-            fhandle.close()
+        if len(summary_json['vulnerability_list']):
+            further_reading += "\n\n|Vulnerability|Software|\n|---|---|\n"
+            for vuln in summary_json['vulnerability_list']:
+                further_reading += f"|{vuln['cve_id']}|{vuln['software_name']}|\n"
  
     return (further_reading)
 
@@ -708,41 +858,23 @@ def tts(text_prompt, output_filename):
     )
     subprocess.run([ "ffmpeg", "-i", f"{output_filename}.wav", "-b:a", "64k", f"{output_filename}.mp3"], check=True)
 
-def remove_cache_after_this_date(caches_path: Path, day: datetime.datetime):
-    debug_output(f"Removing cache content older than {day:%Y-%m-%d %H:%M:%S}")
-    directories_cleaned = 0
-    for child in caches_path.iterdir():
-        if not child.is_dir() or child.is_symlink():
-            continue
-
-        try:
-            cache_date = datetime.datetime.strptime(child.stem, "%Y%m%d%H%M%S")
-            cache_date = cache_date.replace(tzinfo=day.tzinfo)
-        except ValueError:
-            continue
-
-        if cache_date < day:
-            shutil.rmtree(child)
-            directories_cleaned += 1
-
-    debug_output(f"Deleted {directories_cleaned} directories")
-
 def main(config):
-    global APP_NAME
     global APP_DEBUG_OUTPUT
-    global APP_VERSION
-    global APP_CACHE_DIR
     global DISCORD_READ_CHANNEL_ID
     global DISCORD_WRITE_CHANNEL_ID
     global DISCORD_BOT_TOKEN
     global OLLAMA_MAX_CTX
     global OLLAMA_RESERVED_OUTPUT
     global SAFE_INPUT_TOKENS
-    
-    APP_NAME                    = str(os.getenv('APP_NAME'))
+
+    # Installation steps
+    setup_self()
+    setup_dotenv()
+    setup_system_prompts()
+    cache_dir = setup_cache_dir()
+    db_con = setup_database()
+
     APP_DEBUG_OUTPUT            = bool(os.getenv('APP_DEBUG_OUTPUT'))
-    APP_VERSION                 = str(os.getenv('APP_VERSION'))
-    APP_CACHE_DIR               = str(os.getenv('APP_CACHE_DIR'))
     DISCORD_READ_CHANNEL_ID     = str(os.getenv('DISCORD_READ_CHANNEL_ID'))
     DISCORD_WRITE_CHANNEL_ID    = str(os.getenv('DISCORD_WRITE_CHANNEL_ID'))
     DISCORD_BOT_TOKEN           = str(os.getenv('DISCORD_BOT_TOKEN'))
@@ -752,8 +884,6 @@ def main(config):
 
     debug_output(f"Starting {APP_NAME} with configuration")
     debug_output(str(config))
-
-    cache_dir = setup_cache_dir() # installation step
 
     # 1. Go to Discord, read the given channel
     end_time            = datetime.datetime.now(datetime.UTC)
@@ -784,28 +914,23 @@ def main(config):
                 "url": message['embeds'][0]['url'],
                 "title": message['embeds'][0]['title']
             })
-    debug_output(f"Filtered to {len(article_links)} articles")
 
-    debug_output("Setting up cache directories for session")
-    # 2. For all articles read since our last run, visit the article link 
-    # 2.1 Create a working cache directory where to save articles and summaries
-    session_cache_dir_articles = cache_dir / str(end_time.strftime("%Y%m%d%H%M%S")) / "articles"
-    session_cache_dir_summaries = cache_dir / str(end_time.strftime("%Y%m%d%H%M%S")) / "summaries"
-    Path(session_cache_dir_articles).mkdir(exist_ok=True, parents=True)
-    Path(session_cache_dir_summaries).mkdir(exist_ok=True, parents=True)
+    debug_output(f"Filtered to {len(article_links)} articles")
+    article_links = deduplicate_article_links(db_con, article_links)
+    debug_output(f"De-Duplicated Articles to {len(article_links)} total")
 
     # 2.2 Create the thread manager
     debug_output("Preparing to Lookup Articles, spawning thread manager")
-    max_threads = config['max_threads'] if config['max_threads'] is not None else 4 
+    max_threads = int(os.getenv('MAX_THREADS'))
     thread_manager = ThreadManager(max_concurrent_threads=max_threads)
     for article_dict in article_links:
         # Add threads to the thread Manager
         thread_manager.add_task(
             url=article_dict['url'],
             title=article_dict['title'],
-            timeout=config['thread_timeout'],
-            cache_dir=session_cache_dir_articles
+            timeout=int(os.getenv('THREAD_TIMEOUT'))
         )
+
     # 3. Retrieve the full article content 
     debug_output(f"Running multi-threaded article lookups with max_threads={max_threads}")
     thread_manager.run_all()
@@ -814,17 +939,13 @@ def main(config):
     # in the session_cache_dir path. summarize them with Ollama
     # We do this 1 at a time to avoid melting the computer...
     debug_output("Preparing to summarize articles with Ollama")
-    summarize_articles(
-        config, 
-        session_cache_dir_articles, 
-        session_cache_dir_summaries
-    )
+    summarize_articles(start_time, datetime.datetime.now(datetime.UTC))
 
     debug_output(f"Generating Final Executive Summary")
-    exec_summary = executive_summary(config, session_cache_dir_summaries)
+    exec_summary = executive_summary(start_time, datetime.datetime.now(datetime.UTC))
 
-
-    exec_summary_filename = cache_dir / str(end_time.strftime("%Y%m%d%H%M%S")) / 'exec-summary' 
+    exec_summary_filename = cache_dir / str(end_time.strftime("%Y%m%d%H%M%S")) / 'exec-summary'
+    exec_summary_filename.mkdir(parents=True, exist_ok=True)
     exec_summary_final = exec_summary[exec_summary.find("</think>")+8:]
     exec_summary_think = exec_summary[exec_summary.find("<think>")+7:exec_summary.find("</think>")]
 
@@ -835,7 +956,7 @@ def main(config):
     tts(exec_summary_final, exec_summary_filename)
 
     # Write The Executive Summary to Disk
-    further_reading = get_further_reading_section(session_cache_dir_summaries)
+    further_reading = get_further_reading_section(start_time, datetime.datetime.now(datetime.UTC))
     exec_summary_final =f"{DOCUMENT_DISCLAIMER}# Executive Summary\n\n" + exec_summary_final + further_reading 
     with open(f'{exec_summary_filename}.md', 'w', encoding="utf8") as fhandle:
         fhandle.write(exec_summary_final)
@@ -848,6 +969,5 @@ def main(config):
 
 if __name__ == "__main__":
     config = parse_arguments()
-    load_dotenv()
     main(config)
     sys.exit(0)
