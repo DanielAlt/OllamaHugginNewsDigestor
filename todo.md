@@ -14,13 +14,12 @@
 - [Bug] [Audio Generation] We are voice Cloning on each run: cloning the voice 
  once, and storing the voice in the installation directory would be more optimal
 
-- [Feat] Add a CVE lookup tool to enrich Vulnerability Information ** \
- consider https://docs.opencve.io/
 
-- [Feat] Add a Main database. Maintain a SQlite3 database of Article URLs,
- titles, and descriptions, and published_at dates. As well as IOC values. 
- Use it to maintain a 'memory' of events; in order to not report duplicate 
- intelligence, or duplicate articles in a given timeframe. 
+- [Feat] Add a CVE lookup tool to enrich Vulnerability Information ** \
+ consider 
+ https://docs.opencve.io/
+ https://services.nvd.nist.gov/rest/json/cves/2.0?cveId=CVE-2025-27152
+
 
 - [Feat] Article categorization
 - [Feat] Article 'Business Vertical' (try to determine the business vertical 
