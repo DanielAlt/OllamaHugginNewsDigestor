@@ -96,13 +96,11 @@ def summarize_articles(start_time, end_time, system_prompt):
         SELECT a.id, a.content, a.title, a.url
         FROM articles a
         WHERE
-            a.fetched_at BETWEEN :start_time AND :end_time
-            AND NOT EXISTS (
-                SELECT 1
-                FROM article_summaries s
-                WHERE s.article_id = a.id
-            );    
+            a.fetched_at >= :start_time AND
+            a.fetched_at < :end_time AND 
+            a.id NOT IN (SELECT article_id FROM article_summaries); 
     """, {"start_time": start_time, "end_time": end_time})
+
     article_contents = db_cur.fetchall()
 
     encoding = tiktoken.get_encoding("cl100k_base")
@@ -169,7 +167,10 @@ def executive_summary(start_time, end_time, system_prompt) -> str:
         SELECT s.content, a.title 
         FROM article_summaries s 
         JOIN articles a ON (s.article_id = a.id)
-        WHERE a.fetched_at BETWEEN :start_time AND :end_time;
+        WHERE (
+            a.fetched_at >= :start_time AND
+            a.fetched_at < :end_time
+        );
     """, {
         "start_time": start_time,
         "end_time": end_time

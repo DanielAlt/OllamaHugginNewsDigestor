@@ -39,24 +39,24 @@ def main(config):
     # Installation steps
     aa_core.setup_self()
     aa_core.setup_dotenv()
+    aa_core.setup_database()
     system_prompts = aa_core.setup_system_prompts()
     cache_dir = aa_core.setup_cache_dir()
-    db_con = aa_core.setup_database()
 
     aa_core.debug_output(f"Starting {aa_core.APP_NAME} with configuration")
     aa_core.debug_output(str(config))
 
-    # 1. Go to Discord, read the given channel
-    end_time            = datetime.datetime.now(datetime.UTC)
-    start_time          = end_time - datetime.timedelta(days=config["days"])
-    after_snowflake     = datetime_to_snowflake(start_time)
-    before_snowflake    = datetime_to_snowflake(end_time)
-
     # Delete cache over 30 days old
+    utc_now = datetime.datetime.now(datetime.UTC)
     aa_core.remove_cache_after_this_date(
         cache_dir,
-        end_time - datetime.timedelta(days=30)
+        utc_now - datetime.timedelta(days=30)
     )
+
+    # 1. Go to Discord, read the given channel
+    start_time          = utc_now - datetime.timedelta(days=config["days"])
+    after_snowflake     = datetime_to_snowflake(start_time)
+    before_snowflake    = datetime_to_snowflake(utc_now)
 
     aa_core.debug_output("Fetching discord messages...")
     discord_client = DiscordAPIClient(os.getenv("DISCORD_BOT_TOKEN"))
@@ -90,14 +90,11 @@ def main(config):
             title=article_dict['title'],
             timeout=int(os.getenv('THREAD_TIMEOUT'))
         )
-
     # 3. Retrieve the full article content 
     aa_core.debug_output(f"Running multi-threaded article lookups with max_threads={os.getenv('MAX_THREADS')}")
     thread_manager.run_all()
 
-    # 4. At this point articles are all stored as 'txt' files, 
-    # in the session_cache_dir path. summarize them with Ollama
-    # We do this 1 at a time to avoid melting the computer...
+    # Summarize article with Ollama / Extract IOC's
     aa_core.debug_output("Preparing to summarize articles with Ollama")
     summarize_articles(
         start_time, 
@@ -112,7 +109,7 @@ def main(config):
         system_prompts['executive_summary_prompt']
     )
 
-    exec_summary_filename = cache_dir / str(end_time.strftime("%Y%m%d%H%M%S")) / 'exec-summary'
+    exec_summary_filename = cache_dir / str(utc_now.strftime("%Y%m%d%H%M%S")) / 'exec-summary'
     exec_summary_filename.mkdir(parents=True, exist_ok=True)
     exec_summary_final = exec_summary[exec_summary.find("</think>")+8:]
     exec_summary_think = exec_summary[exec_summary.find("<think>")+7:exec_summary.find("</think>")]
