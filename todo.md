@@ -9,7 +9,7 @@
  in order to make the system prompts editable for the user and per the 
  program instance.-
  - [Feat] Once the above Feat is complete, create a configuration wizard tool 
-  for easier onboarding of new users. 
+  for easier onboarding of new users. (no don't do that seems dumb)
 
 - [Bug] [Audio Generation] We are voice Cloning on each run: cloning the voice 
  once, and storing the voice in the installation directory would be more optimal
@@ -26,3 +26,4 @@
  affected by the Article. Certain threats are industry specific, and people 
  are interested in their industry vertical specifically.  
 
+- [FEAT] APA style References in Article Summaries 

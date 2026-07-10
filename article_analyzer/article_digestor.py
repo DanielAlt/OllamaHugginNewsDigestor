@@ -81,84 +81,96 @@ class Article(BaseModel):
     summary: str
 
 
-def summarize_articles(start_time, end_time, system_prompt):
-    """4. Summarize each article with AI; pay specific attention to:
-      - Named people/organizations
-      - Named Malwares 
-      - Indicators of Compromise (IOC)
-      - Severity of issue or finding
-    To assure the prompt doesn't exceed the context window, we truncate if it 
-    does. 
+def save_summarized_article(article_dict):
+    """
+        Save a summarized article to the database
     """
     db_con = get_db_connection()
     db_cur = db_con.cursor()
-    db_cur.execute("""
-        SELECT a.id, a.content, a.title, a.url
-        FROM articles a
-        WHERE
-            a.fetched_at >= :start_time AND
-            a.fetched_at < :end_time AND 
-            a.id NOT IN (SELECT article_id FROM article_summaries); 
-    """, {"start_time": start_time, "end_time": end_time})
+    db_cur.execute(""" 
+        INSERT INTO article_summaries(
+            article_id, 
+            content,
+            reasoning,
+            json
+        ) VALUES (
+            :article_id,
+            :content,
+            :reasoning,
+            :json
+        );
+    """, {
+        "article_id": article_dict['article_id'],
+        "content": article_dict['summary'],
+        "reasoning": article_dict['reasoning'],
+        "json": json.dumps(article_dict)
+    })
+    db_con.commit()
+    
 
-    article_contents = db_cur.fetchall()
-
-    encoding = tiktoken.get_encoding("cl100k_base")
+def summarize_articles(article_contents, system_prompt):
+    """ 
+        Summarize Many Articles with the given system_prompt
+        Save the result to database in between each article 
+    """
+    article_dicts = []
     for article_content in article_contents:
-        article_content_id  = article_content[0]
-        article_content_raw = article_content[1]
-        article_title       = article_content[2]
-        article_url         = article_content[3]
+        article_dict = summarize_article(article_content, system_prompt)
+        save_summarized_article(article_dict)
+        article_dicts.append(article_dict)
+    return article_dicts
 
-        if len(encoding.encode(system_prompt + article_content_raw)) > get_safe_input_tokens():
-            article_content_raw = truncate_to_token_limit(
-                article_content,
-                get_safe_input_tokens() - len(encoding.encode(system_prompt))
-            )
-        
-        debug_output(f"Summarizing Article: {article_title}")
-        now = datetime.datetime.now()
-        response: ChatResponse = chat(
-            model=os.getenv('OLLAMA_MODEL_NAME'), 
-            messages=[
-                {'role': 'system', 'content': system_prompt},
-                {'role': 'user', 'content': article_content_raw}
-            ],
-            format=Article.model_json_schema(),
-            think=False,
-            options={
-                "num_ctx": 16384,
-                "temperature": 0
-            }
+def summarize_article(article_content, system_prompt):
+    """ 
+        Use AI. Summarize a given article using the given system_prompt
+        This part is designed for IOC extraction, and Vulnerability Data 
+        extraction
+    """
+    encoding = tiktoken.get_encoding("cl100k_base")
+    article_content_id  = article_content[0]
+    article_content_raw = article_content[1]
+    article_title       = article_content[2]
+    article_url         = article_content[3]
+
+    if len(encoding.encode(system_prompt + article_content_raw)) > get_safe_input_tokens():
+        article_content_raw = truncate_to_token_limit(
+            article_content,
+            get_safe_input_tokens() - len(encoding.encode(system_prompt))
         )
-        then = datetime.datetime.now()
-        delta = then - now 
-        debug_output(f"Ran for {delta} seconds")
+    
+    debug_output(f"Summarizing Article: {article_title}")
+    now = datetime.datetime.now()
+    response: ChatResponse = chat(
+        model=os.getenv('OLLAMA_MODEL_NAME'), 
+        messages=[
+            {'role': 'system', 'content': system_prompt},
+            {'role': 'user', 'content': article_content_raw}
+        ],
+        format=Article.model_json_schema(),
+        think=True,
+        options={
+            "num_ctx": 16384,
+            "temperature": 0
+        }
+    )
+    then = datetime.datetime.now()
+    delta = then - now 
+    debug_output(f"Ran for {delta} seconds")
 
-        article = Article.model_validate_json(response.message.content)
-        article_dict = article.model_dump()
-        article_dict['url'] = article_url
-        article_dict['title'] = article_title
-
-        db_cur.execute(""" 
-            INSERT INTO article_summaries(
-                article_id, 
-                content,
-                json
-            ) VALUES (
-                :article_id,
-                :content,
-                :json
-            );
-        """, {
-            "article_id": article_content_id,
-            "content": article_dict['summary'],
-            "json": json.dumps(article_dict)
-        })
-        db_con.commit()
+    article = Article.model_validate_json(response.message.content)
+    article_dict = article.model_dump()
+    article_dict['url'] = article_url
+    article_dict['title'] = article_title
+    article_dict['reasoning'] = response.message.thinking
+    article_dict['article_id'] = article_content_id
+    return (article_dict)
 
 def executive_summary(start_time, end_time, system_prompt) -> str:
-    # 6. An executive report should be generated and posted in a discord channel
+    """
+        The Executive Report is generated for entertainment purposes. 
+        Uses the AI to review all summarized articles over a given timeframe. 
+    """
+
     encoding = tiktoken.get_encoding("cl100k_base")
 
     db_con = get_db_connection()

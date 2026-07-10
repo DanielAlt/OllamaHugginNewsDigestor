@@ -14,6 +14,7 @@ from article_analyzer.output_formatter import (
 from article_analyzer.article_digestor import (
     deduplicate_article_links,
     summarize_articles,
+    summarize_article,
     executive_summary
 )
 
@@ -35,11 +36,40 @@ An AI (Ollama) digest of a Discord Message Channel devoted to collecting huggin\
     args = parser.parse_args()
     return vars(args)
 
+
+def summarize_article_by_id(article_id):
+    # Installation steps
+    aa_core.setup_self()
+    aa_core.setup_dotenv()
+    db_con = aa_core.setup_database()
+    system_prompts = aa_core.setup_system_prompts()
+    
+    db_cur = db_con.cursor()
+    db_cur.execute("""
+        SELECT a.id, a.content, a.title, a.url
+        FROM articles a
+        WHERE a.id = :article_id;
+    """, {"article_id": int(article_id) })
+
+    article_content = db_cur.fetchone()
+    # Summarize article with Ollama / Extract IOC's
+    aa_core.debug_output("Summarize articles with Ollama")
+    aa_core.debug_output("System Prompt:")
+    aa_core.debug_output(system_prompts['article_summary_prompt'])
+    aa_core.debug_output("Article Content:")
+    aa_core.debug_output(article_content)
+
+    summary = summarize_article(
+        article_content, 
+        system_prompts['article_summary_prompt']
+    )
+    aa_core.debug_output(summary)
+
 def main(config):
     # Installation steps
     aa_core.setup_self()
     aa_core.setup_dotenv()
-    aa_core.setup_database()
+    db_con = aa_core.setup_database()
     system_prompts = aa_core.setup_system_prompts()
     cache_dir = aa_core.setup_cache_dir()
 
@@ -96,9 +126,18 @@ def main(config):
 
     # Summarize article with Ollama / Extract IOC's
     aa_core.debug_output("Preparing to summarize articles with Ollama")
+    db_cur = db_con.cursor()
+    db_cur.execute("""
+        SELECT a.id, a.content, a.title, a.url
+        FROM articles a
+        WHERE
+            a.fetched_at >= :start_time AND
+            a.fetched_at < :end_time AND 
+            a.id NOT IN (SELECT article_id FROM article_summaries); 
+    """, {"start_time": start_time, "end_time": datetime.datetime.now(datetime.UTC)})
+    article_contents = db_cur.fetchall()
     summarize_articles(
-        start_time, 
-        datetime.datetime.now(datetime.UTC), 
+        article_contents, 
         system_prompts['article_summary_prompt']
     )
 
@@ -136,4 +175,7 @@ def main(config):
 if __name__ == "__main__":
     config = parse_arguments()
     main(config)
+
+    # summarize_article_by_id(139)
+
     sys.exit(0)
